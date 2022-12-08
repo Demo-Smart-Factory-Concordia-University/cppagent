@@ -1,0 +1,117 @@
+# MTConnect Public C++ Agent Docker image build instructions
+#
+# This version is adapted for the Demo Smart Factory at Concordia University
+#
+
+# ---------------------------------------------------------------------
+# notes
+# ---------------------------------------------------------------------
+#
+# Build the docker image:
+#
+#   docker build -t demofact/agent -f Dockerfile.concordia .
+#
+# Run it in interactive mode to check if all went well
+#
+#   docker run -it --rm --init --name agent -p5001:5000 demofact/agent
+#
+
+# ---------------------------------------------------------------------
+# os
+# ---------------------------------------------------------------------
+
+# base image - ubuntu has amd64, arm64 etc.
+# 22.04 is the current long term support release, maintained until 2025-04.
+FROM ubuntu:22.04 AS os
+
+# tzinfo hangs without this
+ARG DEBIAN_FRONTEND=noninteractive
+
+# ---------------------------------------------------------------------
+# build
+# ---------------------------------------------------------------------
+
+FROM os AS build
+
+# update os and add dependencies
+# note: Dockerfiles run as root by default, so don't need sudo
+RUN apt-get clean \
+  && apt-get update \
+  && apt-get install -y \
+  build-essential python3.9 python3-pip git cmake make ruby rake \
+  && pip install conan
+
+# make an agent directory and cd into it
+WORKDIR /root/agent
+
+# bring in the repo contents, minus .dockerignore files
+COPY . .
+
+# set some variables
+ENV PATH=$HOME/venv3.9/bin:$PATH
+ENV CONAN_PROFILE=conan/profiles/docker
+ENV WITH_RUBY=True
+ENV WITH_TESTS=False
+
+# limit cpus so don't run out of memory on local machine
+# symptom: get error - "c++: fatal error: Killed signal terminated program cc1plus"
+# can turn off if building in cloud
+ENV CONAN_CPU_COUNT=1
+
+# make installer
+RUN conan export conan/mqtt_cpp \
+  && conan export conan/mruby \
+  && conan install . -if build --build=missing \
+  -pr $CONAN_PROFILE \
+  -o build_tests=$WITH_TESTS \
+  -o run_tests=$WITH_TESTS \
+  -o with_ruby=$WITH_RUBY
+
+# compile source (~20mins - 4hrs for qemu)
+RUN conan build . -bf build
+
+# ---------------------------------------------------------------------
+# release
+# ---------------------------------------------------------------------
+
+FROM os AS release
+
+LABEL author="mtconnect" description="Docker image for the latest Production MTConnect C++ Agent"
+
+# change to a new non-root user for better security.
+# this also adds the user to a group with the same name.
+# --create-home creates a home folder, ie /home/<username>
+RUN useradd --create-home agent
+USER agent
+
+# install agent executable
+COPY --chown=agent:agent --from=build /root/agent/build/bin/agent /usr/local/bin/
+
+# copy data to /etc/mtconnect
+COPY --chown=agent:agent --from=build /root/agent/schemas /etc/mtconnect/schemas
+COPY --chown=agent:agent --from=build /root/agent/styles /etc/mtconnect/styles
+
+# expose port
+EXPOSE 5000
+
+WORKDIR /home/agent
+
+USER agent
+RUN mkdir log 
+
+
+# ---------------------------------------------------------------------
+# note
+# ---------------------------------------------------------------------
+
+# after setup, the dirs look like this -
+#
+# /usr/local/bin
+#  |-- agent - the cppagent application
+#
+# /etc/mtconnect
+#  |-- schemas - xsd files
+#  |-- styles - styles.xsl, styles.css, favicon.ico, etc
+#
+# /home/agent - the user's directory
+#  |-- log - folder for log files produced by the agent
